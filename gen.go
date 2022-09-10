@@ -1,4 +1,4 @@
-// +build ignore
+//go:build ignore
 
 package main
 
@@ -18,40 +18,38 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/kenshaw/snaker"
 )
 
-const (
-	ncursesSrc = "https://ftp.gnu.org/pub/gnu/ncurses/ncurses-6.2.tar.gz"
-	capsFile   = "ncurses-6.2/include/Caps"
-)
-
-var commentRE = regexp.MustCompile(`^#.*`)
-
-func notSpace(r rune) bool {
-	return !unicode.IsSpace(r)
-}
-
 func main() {
-	cache := flag.String("cache", ".cache", "cache directory")
 	out := flag.String("out", "capvals.go", "out file")
+	cache := flag.String("cache", ".cache", "cache directory")
+	ver := flag.String("ver", "", "version")
 	flag.Parse()
-	if err := run(*cache, *out); err != nil {
-		log.Fatal(err)
+	if err := run(*out, *cache, *ver); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
-func run(cache, dest string) error {
+func run(dest, cache, ver string) error {
+	// get version
+	ver, err := getVer(ver)
+	if err != nil {
+		return err
+	}
 	// get archive
-	buf, err := get(cache, ncursesSrc)
+	buf, err := get(cache, ver)
 	if err != nil {
 		return err
 	}
 	// load caps file
-	caps, err := load(buf, capsFile)
+	caps, err := load(buf, ver)
 	if err != nil {
 		return err
 	}
@@ -68,10 +66,39 @@ func run(cache, dest string) error {
 	return ioutil.WriteFile(dest, buf, 0o644)
 }
 
-// get retrieves a file either from the the http path, or from disk.
-func get(cache, file string) ([]byte, error) {
-	err := os.MkdirAll(cache, 0o755)
+func getVer(ver string) (string, error) {
+	if ver != "" {
+		return ver, nil
+	}
+	res, err := http.Get("https://ftp.gnu.org/pub/gnu/ncurses/")
 	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	buf, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+	m := verRE.FindAllStringSubmatch(string(buf), -1)
+	sort.Slice(m, func(i, j int) bool {
+		va, _ := strconv.Atoi(m[i][1])
+		vb, _ := strconv.Atoi(m[j][1])
+		if va == vb {
+			va, _ = strconv.Atoi(m[i][2])
+			vb, _ = strconv.Atoi(m[j][2])
+			return va > vb
+		}
+		return va > vb
+	})
+	return m[0][1] + "." + m[0][2], nil
+}
+
+var verRE = regexp.MustCompile(`href="ncurses-([0-9]+)\.([0-9]+)\.tar\.gz"`)
+
+// get retrieves a file either from the the http path, or from disk.
+func get(cache, ver string) ([]byte, error) {
+	file := fmt.Sprintf("https://ftp.gnu.org/pub/gnu/ncurses/ncurses-%s.tar.gz", ver)
+	if err := os.MkdirAll(cache, 0o755); err != nil {
 		return nil, err
 	}
 	// check if the file exists
@@ -95,15 +122,15 @@ func get(cache, file string) ([]byte, error) {
 	}
 	// cache
 	log.Printf("saving %s", cacheFile)
-	err = ioutil.WriteFile(cacheFile, buf, 0o644)
-	if err != nil {
+	if err := ioutil.WriteFile(cacheFile, buf, 0o644); err != nil {
 		return nil, err
 	}
 	return buf, nil
 }
 
 // load extracts a file from a tar.gz.
-func load(buf []byte, file string) ([]byte, error) {
+func load(buf []byte, ver string) ([]byte, error) {
+	file := fmt.Sprintf("ncurses-%s/include/Caps", ver)
 	// create gzip reader
 	gr, err := gzip.NewReader(bytes.NewReader(buf))
 	if err != nil {
@@ -193,12 +220,12 @@ func processCaps(capsBuf []byte) ([]byte, error) {
 			typ = "string"
 			stringCount++
 		default:
-			log.Fatal("line %d is invalid, has type: %s", n, row[2])
+			return nil, fmt.Errorf("line %d is invalid, has type: %s", n, row[2])
 		}
 		if isFirst == "" {
 			buf.WriteString("\n")
 		}
-		buf.WriteString(fmt.Sprintf("// The %s [%s, %s] %s capability ", name, row[0], row[1], typ) + formatComment(row[7], prefix, suffix) + "\n" + name + isFirst + "\n")
+		fmt.Fprintf(buf, "// The %s [%s, %s] %s capability %s\n%s%s", name, row[0], row[1], typ, formatComment(row[7], prefix, suffix), name, isFirst)
 		*names = append(*names, row[0], row[1])
 		n++
 	}
@@ -212,14 +239,14 @@ func processCaps(capsBuf []byte) ([]byte, error) {
 	for i, b := range []*bytes.Buffer{bools, nums, strs} {
 		f.WriteString(fmt.Sprintf("// %s capabilities.\nconst (\n", typs[i]))
 		b.WriteTo(f)
-		f.WriteString(")\n\n")
+		f.WriteString(")\n")
 	}
 	// add counts
 	f.WriteString("const (\n")
-	f.WriteString(fmt.Sprintf("// CapCountBool is the count of bool capabilities.\nCapCountBool = %s+1\n\n", lastBool))
-	f.WriteString(fmt.Sprintf("// CapCountNum is the count of num capabilities.\nCapCountNum = %s+1\n\n", lastNum))
+	f.WriteString(fmt.Sprintf("// CapCountBool is the count of bool capabilities.\nCapCountBool = %s+1\n", lastBool))
+	f.WriteString(fmt.Sprintf("// CapCountNum is the count of num capabilities.\nCapCountNum = %s+1\n", lastNum))
 	f.WriteString(fmt.Sprintf("// CapCountString is the count of string capabilities.\nCapCountString = %s+1\n", lastString))
-	f.WriteString(")\n\n")
+	f.WriteString(")\n")
 	// add names
 	z := []string{"bool", "num", "string"}
 	for n, s := range [][]string{boolNames, numNames, stringNames} {
@@ -242,8 +269,12 @@ func formatComment(s, prefix, suffix string) string {
 	return strings.TrimSpace(prefix+" "+s+" "+suffix) + "."
 }
 
+func notSpace(r rune) bool {
+	return !unicode.IsSpace(r)
+}
+
+var commentRE = regexp.MustCompile(`^#.*`)
+
 const hdr = `package terminfo
-
 	// Code generated by gen.go. DO NOT EDIT.
-
 `
