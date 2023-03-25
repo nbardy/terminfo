@@ -1,4 +1,4 @@
-module github.com/xo/terminfo
+module github.com/nbardy/terminfo
 
 go 1.19
 
