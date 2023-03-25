@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/xo/terminfo"
+	"github.com/nbardy/terminfo"
 )
 
 var (

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/xo/terminfo"
+	"github.com/nbardy/terminfo"
 )
 
 func main() {
